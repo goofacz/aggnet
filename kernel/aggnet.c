@@ -58,15 +58,6 @@ static instance_t instance;
 static packet_t* packet_alloc(struct sk_buff *skb)
 {
     packet_t* pkt;
-    u32* len;
-
-    len = skb_push(skb, sizeof(*len));
-    if (!len) {
-        dev_kfree_skb(skb);
-        return NULL;
-    }
-
-    *len = skb->len;
 
     pkt = kmalloc (sizeof(*skb), GFP_KERNEL);
     if (!pkt) {
