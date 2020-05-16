@@ -54,7 +54,18 @@ static instance_t instance;
 
 static packet_t* packet_alloc(struct sk_buff *skb)
 {
-    packet_t* pkt = kmalloc (sizeof(*skb), GFP_KERNEL);
+    packet_t* pkt;
+    u32* len;
+
+    len = skb_push(skb, sizeof(*len));
+    if (!len) {
+        dev_kfree_skb(skb);
+        return NULL;
+    }
+
+    *len = skb->len;
+
+    pkt = kmalloc (sizeof(*skb), GFP_KERNEL);
     if (!pkt) {
         dev_kfree_skb(skb);
         return NULL;
@@ -205,30 +216,22 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     int res;
     packet_t* pkt;
-    u32* len;
 
     pkt = packet_alloc(skb);
     if (!pkt) {
         return -ENOMEM;
     }
 
-    len = skb_push(pkt->skb, sizeof(*len));
-    if (!len) {
-        goto error_free;
-    }
-
-    *len = pkt->skb->len;
-
     res = packet_queue_push(&instance.out_queue, pkt);
     if (res < 0) {
-        return res;
+        goto error_free;
     }
 
     return 0;
 
 error_free:
     packet_free(pkt);
-    return -ENOMEM;
+    return res;
 }
 
 static int net_dev_hard_header(struct sk_buff *skb, struct net_device *dev, unsigned short type, const void *daddr, const void *saddr, unsigned len)
