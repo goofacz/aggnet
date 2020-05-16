@@ -26,6 +26,8 @@
 
 MODULE_LICENSE("GPL");
 
+#define MAX_PACKET_QUEUE_SIZE 10
+
 typedef struct {
     struct list_head list;
     struct sk_buff *skb;
@@ -35,6 +37,7 @@ typedef struct {
     wait_queue_head_t wait_queue;
     struct mutex mutex;
     struct list_head packets;
+    unsigned int cnt;
 } packet_queue_t;
 
 typedef struct {
@@ -86,6 +89,7 @@ static void packet_queue_init(packet_queue_t* queue)
     init_waitqueue_head(&queue->wait_queue);
     mutex_init(&queue->mutex);
     INIT_LIST_HEAD(&queue->packets);
+    queue->cnt = 0;
 }
 
 static void packet_queue_fini(packet_queue_t* queue)
@@ -105,12 +109,24 @@ static int packet_queue_push(packet_queue_t* queue, packet_t* pkt)
         return -ERESTARTSYS;
     }
 
+    if (queue->cnt > MAX_PACKET_QUEUE_SIZE) {
+        goto error_nobufs;
+    }
+
     list_add_tail(&pkt->list, &queue->packets);
+    queue->cnt++;
 
     mutex_unlock(&queue->mutex);
     wake_up_interruptible(&queue->wait_queue);
 
     return 0;
+
+error_nobufs:
+    mutex_unlock(&queue->mutex);
+    packet_free(pkt);
+
+    printk(KERN_WARNING "aggnet: TX queue is full");
+    return -ENOBUFS;
 }
 
 static int packet_queue_peak(packet_queue_t* queue, packet_t** pkt)
@@ -148,6 +164,7 @@ static int packet_queue_pop(packet_queue_t* queue)
         packet_t* pkt = list_entry(queue->packets.next, packet_t, list);
         list_del(&pkt->list);
         packet_free(pkt);
+        queue->cnt--;
     }
 
     mutex_unlock(&queue->mutex);
@@ -186,6 +203,10 @@ static ssize_t char_dev_read(struct file *filp, char __user *buf, size_t count, 
         return res;
     }
 
+    if (netif_queue_stopped(instance.net_dev)) {
+        netif_wake_queue(instance.net_dev);
+    }
+
     return copied_bytes;
 }
 
@@ -217,6 +238,8 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
     int res;
     packet_t* pkt;
 
+    printk(KERN_DEBUG "%s", __func__);
+
     pkt = packet_alloc(skb);
     if (!pkt) {
         return -ENOMEM;
@@ -224,14 +247,14 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
     res = packet_queue_push(&instance.out_queue, pkt);
     if (res < 0) {
-        goto error_free;
+        if (res == -ENOBUFS) {
+            netif_stop_queue(instance.net_dev);
+        }
+
+        return res;
     }
 
     return 0;
-
-error_free:
-    packet_free(pkt);
-    return res;
 }
 
 static int net_dev_hard_header(struct sk_buff *skb, struct net_device *dev, unsigned short type, const void *daddr, const void *saddr, unsigned len)
@@ -300,6 +323,7 @@ static const struct net_device_ops net_dev_ops = {
 static void net_dev_setup(struct net_device* dev)
 {
     ether_setup(dev);
+    dev->watchdog_timeo = 5 * HZ;
 	dev->netdev_ops = &net_dev_ops;
     dev->header_ops = &net_dev_header_ops;
 	dev->flags = (dev->flags & ~(IFF_MULTICAST | IFF_BROADCAST)) | IFF_NOARP;
