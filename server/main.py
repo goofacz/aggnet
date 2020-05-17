@@ -19,6 +19,7 @@ def process_client(clinet):
 
 def process_server(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(('localhost', port))
         server.listen(1)
 
