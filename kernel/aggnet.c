@@ -23,6 +23,7 @@
 #include <linux/netdevice.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
+#include <linux/poll.h>
 
 MODULE_LICENSE("GPL");
 
@@ -46,8 +47,8 @@ typedef struct {
     int minor;
     struct cdev char_dev;
 
-    packet_queue_t in_queue;
-    packet_queue_t out_queue;
+    packet_queue_t from_usr_queue;
+    packet_queue_t to_usr_queue;
 
     /* Network device */
     struct net_device* net_dev;
@@ -162,6 +163,19 @@ static int packet_queue_pop(packet_queue_t* queue)
 
     return 0;
 }
+
+static bool packet_queue_poll(packet_queue_t* queue, struct file *filp, poll_table *wait)
+{
+    bool has_pkts;
+
+    mutex_lock(&queue->mutex);
+    poll_wait(filp, &queue->wait_queue, wait);
+    has_pkts = !list_empty(&queue->packets);
+    mutex_unlock(&queue->mutex);
+
+    return has_pkts;
+}
+
 static int char_dev_open(struct inode *inode, struct file *filp)
 {
     printk(KERN_DEBUG "%s", __func__);
@@ -181,7 +195,7 @@ static ssize_t char_dev_read(struct file *filp, char __user *buf, size_t count, 
     int res;
     packet_t* pkt;
 
-    res = packet_queue_peak(&instance.out_queue, &pkt);
+    res = packet_queue_peak(&instance.to_usr_queue, &pkt);
     if (res < 0) {
         return res;
     }
@@ -189,7 +203,7 @@ static ssize_t char_dev_read(struct file *filp, char __user *buf, size_t count, 
     pending_pytes = copy_to_user(buf, pkt->skb->data, pkt->skb->len);
     copied_bytes = pkt->skb->len - pending_pytes;
 
-    res = packet_queue_pop(&instance.out_queue);
+    res = packet_queue_pop(&instance.to_usr_queue);
     if (res < 0) {
         return res;
     }
@@ -205,6 +219,12 @@ static ssize_t char_dev_write(struct file *filp, const char __user *buf, size_t 
 {
     printk(KERN_DEBUG "%s", __func__);
     return 0;
+}
+
+static unsigned int char_dev_poll(struct file *filp, poll_table *wait)
+{
+    return (packet_queue_poll(&instance.to_usr_queue, filp, wait) ? POLLIN : 0) |
+           (packet_queue_poll(&instance.from_usr_queue, filp, wait) ? POLLOUT : 0);
 }
 
 static int net_dev_open(struct net_device *dev)
@@ -236,7 +256,7 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
         return -ENOMEM;
     }
 
-    res = packet_queue_push(&instance.out_queue, pkt);
+    res = packet_queue_push(&instance.to_usr_queue, pkt);
     if (res < 0) {
         if (res == -ENOBUFS) {
             netif_stop_queue(instance.net_dev);
@@ -296,6 +316,7 @@ static const struct file_operations char_dev_fops = {
     .write = char_dev_write,
     .open = char_dev_open,
     .release = char_dev_release,
+    .poll = char_dev_poll,
 };
 
 static const struct header_ops net_dev_header_ops = {
@@ -331,8 +352,8 @@ static int aggnet_init(void)
     printk(KERN_DEBUG "%s", __func__);
     memset(&instance, 0, sizeof(instance));
 
-    packet_queue_init(&instance.in_queue);
-    packet_queue_init(&instance.out_queue);
+    packet_queue_init(&instance.from_usr_queue);
+    packet_queue_init(&instance.to_usr_queue);
 
     result = alloc_chrdev_region(&devno, instance.minor, 1, "aggnet");
     if (result < 0) {
@@ -376,8 +397,8 @@ static void aggnet_exit(void)
     dev_t devno = MKDEV(instance.major, instance.minor);
 
     printk(KERN_DEBUG "%s", __func__);
-    packet_queue_fini(&instance. in_queue);
-    packet_queue_fini(&instance. out_queue);
+    packet_queue_fini(&instance. from_usr_queue);
+    packet_queue_fini(&instance. to_usr_queue);
 
     unregister_netdev(instance.net_dev);
     free_netdev(instance.net_dev);
