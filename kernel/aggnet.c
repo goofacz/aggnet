@@ -55,6 +55,7 @@ typedef struct {
 } instance_t;
 
 static instance_t instance;
+static char* mode = "server";
 
 static packet_t* packet_alloc(struct sk_buff *skb)
 {
@@ -406,6 +407,8 @@ static void aggnet_exit(void)
     unregister_chrdev_region(devno, 1);
     cdev_del(&instance.char_dev);
 }
+
+module_param(mode, charp, S_IRUGO);
 
 module_init(aggnet_init);
 module_exit(aggnet_exit);
