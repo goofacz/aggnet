@@ -2,19 +2,17 @@ import socket
 import select
 
 
-def process_client(clinet):
-    with open('dev/aggnet0', 'rw') as aggnet:
+def process_client(client):
+    with open('/dev/aggnet0', 'wb+') as aggnet:
         while True:
-            sockets = [aggnet, client]
+            sockets = [client, aggnet]
             inputs, outputs, exceptions = select.select(sockets, sockets, sockets)
 
-            if aggnet in inputs:
-                pass
-            if aggnet in inputs:
+            if client in inputs:
                 pass
             if client in outputs:
                 pass
-            if client in outputs:
+            if client in exceptions:
                 pass
 
 def process_server(port):
@@ -24,8 +22,8 @@ def process_server(port):
         server.listen(1)
 
         while True:
-            with server.accept() as client:
-                process_client(client)
+            client, _ = server.accept()
+            process_client(client)
 
 def main():
     process_server(20000)
