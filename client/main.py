@@ -7,9 +7,12 @@ def process_client(address):
     client.connect(address)
 
     with open('/dev/aggnet0', 'wb+') as aggnet:
+        inputs = [aggnet, client]
+        outputs = []
+        exceptions = []
+
         while True:
-            sockets = [aggnet, client]
-            inputs, outputs, exceptions = select.select(sockets, sockets, sockets)
+            inputs, outputs, exceptions = select.select(inputs, outputs, exceptions)
 
             if aggnet in inputs:
                 pass
