@@ -222,6 +222,15 @@ static ssize_t char_dev_write(struct file *filp, const char __user *buf, size_t 
     return 0;
 }
 
+static loff_t char_dev_llseek(struct file *filp, loff_t off, int foo)
+{
+    if (off != 0) {
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
 static unsigned int char_dev_poll(struct file *filp, poll_table *wait)
 {
     return (packet_queue_poll(&instance.to_usr_queue, filp, wait) ? POLLIN : 0) |
@@ -318,6 +327,7 @@ static const struct file_operations char_dev_fops = {
     .open = char_dev_open,
     .release = char_dev_release,
     .poll = char_dev_poll,
+    .llseek = char_dev_llseek,
 };
 
 static const struct header_ops net_dev_header_ops = {
