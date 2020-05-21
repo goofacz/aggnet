@@ -57,7 +57,7 @@ typedef struct {
 static instance_t instance;
 static char* mode = "server";
 
-static packet_t* packet_alloc(struct sk_buff *skb)
+static packet_t* packet_alloc_from_skb(struct sk_buff *skb)
 {
     packet_t* pkt;
 
@@ -191,18 +191,30 @@ static int char_dev_release(struct inode *inode, struct file *filp)
 
 static ssize_t char_dev_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
-    unsigned long pending_pytes;
-    unsigned long copied_bytes;
+    size_t copied_bytes;
     int res;
     packet_t* pkt;
+    u32 skb_len;
 
+    printk(KERN_DEBUG "%s", __func__);
     res = packet_queue_peak(&instance.to_usr_queue, &pkt);
     if (res < 0) {
         return res;
     }
 
-    pending_pytes = copy_to_user(buf, pkt->skb->data, pkt->skb->len);
-    copied_bytes = pkt->skb->len - pending_pytes;
+    if (count < sizeof(skb_len) + pkt->skb->len) {
+        printk(KERN_WARNING "aggnet: cdev read buff to small (size: %u, need: %u)", (u32) count, (u32) sizeof(skb_len) + pkt->skb->len);
+        return -ENOBUFS;
+    }
+
+    skb_len = pkt->skb->len;
+    copied_bytes = copy_to_user(buf, &skb_len, sizeof(skb_len));
+    copied_bytes += copy_to_user(buf + sizeof(skb_len), pkt->skb->data, pkt->skb->len);
+
+    if (count < sizeof(skb_len) + pkt->skb->len) {
+        printk(KERN_WARNING "aggnet: cdev partial read (size: %u, need: %u)", (u32) copied_bytes, (u32) sizeof(skb_len) + pkt->skb->len);
+        return -ENOBUFS;
+    }
 
     res = packet_queue_pop(&instance.to_usr_queue);
     if (res < 0) {
@@ -213,7 +225,7 @@ static ssize_t char_dev_read(struct file *filp, char __user *buf, size_t count, 
         netif_wake_queue(instance.net_dev);
     }
 
-    return copied_bytes;
+    return sizeof(skb_len) + pkt->skb->len;
 }
 
 static ssize_t char_dev_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
@@ -261,7 +273,7 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
     printk(KERN_DEBUG "%s", __func__);
 
-    pkt = packet_alloc(skb);
+    pkt = packet_alloc_from_skb(skb);
     if (!pkt) {
         return -ENOMEM;
     }
