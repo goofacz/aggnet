@@ -42,13 +42,18 @@ typedef struct {
 } packet_queue_t;
 
 typedef struct {
+    packet_queue_t queue;
+    size_t copied_size;
+} cdev_read_queue_t;
+
+typedef struct {
     /* char device */
     int major;
     int minor;
     struct cdev char_dev;
 
     packet_queue_t from_usr_queue;
-    packet_queue_t to_usr_queue;
+    cdev_read_queue_t read_queue;
 
     /* Network device */
     struct net_device* net_dev;
@@ -147,6 +152,24 @@ static int packet_queue_peak(packet_queue_t* queue, packet_t** pkt)
     return 0;
 }
 
+static int packet_queue_try_peak(packet_queue_t* queue, packet_t** pkt)
+{
+    if (mutex_lock_interruptible(&queue->mutex)) {
+        return -ERESTARTSYS;
+    }
+
+    if (list_empty(&queue->packets)) {
+        *pkt = NULL;
+    }
+    else {
+        *pkt = list_entry(queue->packets.next, packet_t, list);
+    }
+
+    mutex_unlock(&queue->mutex);
+
+    return 0;
+}
+
 static int packet_queue_pop(packet_queue_t* queue)
 {
     if (mutex_lock_interruptible(&queue->mutex)) {
@@ -177,6 +200,70 @@ static bool packet_queue_poll(packet_queue_t* queue, struct file *filp, poll_tab
     return has_pkts;
 }
 
+static void cdev_read_queue_init(cdev_read_queue_t* queue)
+{
+    packet_queue_init(&queue->queue);
+    queue->copied_size = 0;
+}
+
+static void cdev_read_queue_fini(cdev_read_queue_t* queue)
+{
+    packet_queue_fini(&queue->queue);
+}
+
+static ssize_t cdev_read_queue_copy_to_user(cdev_read_queue_t* queue, char __user *buf, size_t count)
+{
+    size_t total_copied_size = 0;
+
+    while (total_copied_size < count) {
+        int res;
+        packet_t* pkt;
+        u32 skb_len;
+        unsigned long not_copied_size;
+
+        if (total_copied_size == 0) {
+            res = packet_queue_peak(&instance.read_queue.queue, &pkt);
+        }
+        else {
+            res = packet_queue_try_peak(&instance.read_queue.queue, &pkt);
+        }
+
+        if (res < 0) {
+            return res;
+        }
+
+        if (!pkt) {
+            break;
+        }
+
+        if (queue->copied_size < sizeof(skb_len)) {
+            skb_len = pkt->skb->len;
+            not_copied_size = copy_to_user(buf + total_copied_size, &skb_len + queue->copied_size, sizeof(skb_len) - queue->copied_size);
+            total_copied_size += (sizeof(skb_len) - queue->copied_size) - not_copied_size;
+            queue->copied_size += (sizeof(skb_len) - queue->copied_size) - not_copied_size;
+        }
+        else {
+            not_copied_size = copy_to_user(buf + total_copied_size, pkt->skb->data + queue->copied_size - sizeof(skb_len), pkt->skb->len - queue->copied_size + sizeof(skb_len));
+            total_copied_size += (pkt->skb->len - queue->copied_size + sizeof(skb_len)) - not_copied_size;
+            queue->copied_size += (pkt->skb->len - queue->copied_size + sizeof(skb_len)) - not_copied_size;
+        }
+
+        if (queue->copied_size == sizeof(skb_len) + pkt->skb->len) {
+            queue->copied_size = 0;
+            res = packet_queue_pop(&instance.read_queue.queue);
+            if (res < 0) {
+                return res;
+            }
+        }
+
+        if (not_copied_size > 0) {
+            break;
+        }
+    }
+
+    return total_copied_size;
+}
+
 static int char_dev_open(struct inode *inode, struct file *filp)
 {
     printk(KERN_DEBUG "%s", __func__);
@@ -191,41 +278,16 @@ static int char_dev_release(struct inode *inode, struct file *filp)
 
 static ssize_t char_dev_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
-    size_t copied_bytes;
-    int res;
-    packet_t* pkt;
-    u32 skb_len;
+    ssize_t copied_bytes;
 
     printk(KERN_DEBUG "%s", __func__);
-    res = packet_queue_peak(&instance.to_usr_queue, &pkt);
-    if (res < 0) {
-        return res;
-    }
-
-    if (count < sizeof(skb_len) + pkt->skb->len) {
-        printk(KERN_WARNING "aggnet: cdev read buff to small (size: %u, need: %u)", (u32) count, (u32) sizeof(skb_len) + pkt->skb->len);
-        return -ENOBUFS;
-    }
-
-    skb_len = pkt->skb->len;
-    copied_bytes = copy_to_user(buf, &skb_len, sizeof(skb_len));
-    copied_bytes += copy_to_user(buf + sizeof(skb_len), pkt->skb->data, pkt->skb->len);
-
-    if (count < sizeof(skb_len) + pkt->skb->len) {
-        printk(KERN_WARNING "aggnet: cdev partial read (size: %u, need: %u)", (u32) copied_bytes, (u32) sizeof(skb_len) + pkt->skb->len);
-        return -ENOBUFS;
-    }
-
-    res = packet_queue_pop(&instance.to_usr_queue);
-    if (res < 0) {
-        return res;
-    }
+    copied_bytes = cdev_read_queue_copy_to_user(&instance.read_queue, buf, count);
 
     if (netif_queue_stopped(instance.net_dev)) {
         netif_wake_queue(instance.net_dev);
     }
 
-    return sizeof(skb_len) + pkt->skb->len;
+    return copied_bytes;
 }
 
 static ssize_t char_dev_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
@@ -245,7 +307,7 @@ static loff_t char_dev_llseek(struct file *filp, loff_t off, int foo)
 
 static unsigned int char_dev_poll(struct file *filp, poll_table *wait)
 {
-    return (packet_queue_poll(&instance.to_usr_queue, filp, wait) ? POLLIN : 0) |
+    return (packet_queue_poll(&instance.read_queue.queue, filp, wait) ? POLLIN : 0) |
            (packet_queue_poll(&instance.from_usr_queue, filp, wait) ? POLLOUT : 0);
 }
 
@@ -278,7 +340,7 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
         return -ENOMEM;
     }
 
-    res = packet_queue_push(&instance.to_usr_queue, pkt);
+    res = packet_queue_push(&instance.read_queue.queue, pkt);
     if (res < 0) {
         if (res == -ENOBUFS) {
             netif_stop_queue(instance.net_dev);
@@ -327,7 +389,7 @@ static int net_dev_set_config(struct net_device *dev, struct ifmap *map)
     return 0;
 }
 
-void net_dev_priv_destructor(struct net_device *dev)
+static void net_dev_priv_destructor(struct net_device *dev)
 {
     printk(KERN_DEBUG "%s", __func__);
 }
@@ -376,7 +438,7 @@ static int aggnet_init(void)
     memset(&instance, 0, sizeof(instance));
 
     packet_queue_init(&instance.from_usr_queue);
-    packet_queue_init(&instance.to_usr_queue);
+    cdev_read_queue_init(&instance.read_queue);
 
     result = alloc_chrdev_region(&devno, instance.minor, 1, "aggnet");
     if (result < 0) {
@@ -421,7 +483,7 @@ static void aggnet_exit(void)
 
     printk(KERN_DEBUG "%s", __func__);
     packet_queue_fini(&instance. from_usr_queue);
-    packet_queue_fini(&instance. to_usr_queue);
+    cdev_read_queue_fini(&instance.read_queue);
 
     unregister_netdev(instance.net_dev);
     free_netdev(instance.net_dev);
