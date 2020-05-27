@@ -57,6 +57,7 @@ typedef struct {
 
     /* Network device */
     struct net_device* net_dev;
+    struct net_device_stats net_dev_stats;
 } instance_t;
 
 static instance_t instance;
@@ -349,6 +350,9 @@ static int net_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
         return res;
     }
 
+    instance.net_dev_stats.tx_packets++;
+    instance.net_dev_stats.tx_bytes += skb->len;
+
     return 0;
 }
 
@@ -371,16 +375,14 @@ static int net_dev_hard_header(struct sk_buff *skb, struct net_device *dev, unsi
 static void net_dev_tx_timeout(struct net_device *dev)
 {
     printk(KERN_DEBUG "%s", __func__);
+    instance.net_dev_stats.tx_errors++;
     return;
 }
 
 static struct net_device_stats* net_dev_get_stats(struct net_device *dev)
 {
-    static struct net_device_stats x;
-
     printk(KERN_DEBUG "%s", __func__);
-    memset(&x,0, sizeof (struct net_device_stats));
-    return &x;
+    return &instance.net_dev_stats;
 }
 
 static int net_dev_set_config(struct net_device *dev, struct ifmap *map)
