@@ -47,13 +47,19 @@ typedef struct {
 } cdev_read_queue_t;
 
 typedef struct {
+    struct sk_buff *skb;
+    size_t copied_size;
+    u32 packet_size;
+} cdev_write_buffer_t;
+
+typedef struct {
     /* char device */
     int major;
     int minor;
     struct cdev char_dev;
 
-    packet_queue_t from_usr_queue;
     cdev_read_queue_t read_queue;
+    cdev_write_buffer_t write_buffer;
 
     /* Network device */
     struct net_device* net_dev;
@@ -265,6 +271,25 @@ static ssize_t cdev_read_queue_copy_to_user(cdev_read_queue_t* queue, char __use
     return total_copied_size;
 }
 
+static void cdev_write_buffer_init(cdev_write_buffer_t* queue)
+{
+    queue->skb = NULL;
+    queue->copied_size = 0;
+    queue->packet_size = 0;
+}
+
+static void cdev_write_buffer_fini(cdev_write_buffer_t* queue)
+{
+    dev_kfree_skb(queue->skb);
+}
+
+static ssize_t cdev_write_queue_copy_from_user(cdev_write_buffer_t* queue, const char __user *buf, size_t count)
+{
+    size_t total_copied_size = 0;
+
+    return total_copied_size;
+}
+
 static int char_dev_open(struct inode *inode, struct file *filp)
 {
     printk(KERN_DEBUG "%s", __func__);
@@ -308,8 +333,7 @@ static loff_t char_dev_llseek(struct file *filp, loff_t off, int foo)
 
 static unsigned int char_dev_poll(struct file *filp, poll_table *wait)
 {
-    return (packet_queue_poll(&instance.read_queue.queue, filp, wait) ? POLLIN : 0) |
-           (packet_queue_poll(&instance.from_usr_queue, filp, wait) ? POLLOUT : 0);
+    return (packet_queue_poll(&instance.read_queue.queue, filp, wait) ? POLLIN : 0) | POLLOUT;
 }
 
 static int net_dev_open(struct net_device *dev)
@@ -439,8 +463,8 @@ static int aggnet_init(void)
     printk(KERN_DEBUG "%s", __func__);
     memset(&instance, 0, sizeof(instance));
 
-    packet_queue_init(&instance.from_usr_queue);
     cdev_read_queue_init(&instance.read_queue);
+    cdev_write_buffer_init(&instance.write_buffer);
 
     result = alloc_chrdev_region(&devno, instance.minor, 1, "aggnet");
     if (result < 0) {
@@ -484,8 +508,8 @@ static void aggnet_exit(void)
     dev_t devno = MKDEV(instance.major, instance.minor);
 
     printk(KERN_DEBUG "%s", __func__);
-    packet_queue_fini(&instance. from_usr_queue);
     cdev_read_queue_fini(&instance.read_queue);
+    cdev_write_buffer_fini(&instance.write_buffer);
 
     unregister_netdev(instance.net_dev);
     free_netdev(instance.net_dev);
