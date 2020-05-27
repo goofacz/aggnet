@@ -2,17 +2,35 @@ import socket
 import select
 import struct
 
+
 def aggnet_read(handle):
     ignored_dest_macs = [b'\xff\xff\xff\xff\xff\xff', b'\x33\x33\x00\x00\x00\x01', b'\x33\x33\x00\x00\x00\x02']
 
     length = struct.unpack('i', handle.read(4))[0]
     frame = handle.read(length)
     if frame[0:6] in ignored_dest_macs:
-        print('drop frame!')
+        return
+
+
+def client_read(client, in_frames):
+    length_bytes = client.recv(4)
+    if len(length_bytes) != 4:
+        raise RuntimeError(f'Partial read on TCP (read {len(length_bytes)}, expected: {4})!');
+
+    length = struct.unpack('i', length_bytes)[0]
+    frame = client.recv(length)
+    if len(frame) != length:
+        raise RuntimeError(f'Partial read on TCP (read {len(frame)}, expected: {length})!');
+
+    in_frames.append(length_bytes)
+    in_frames.append(frame)
+
 
 def process_client(client):
     with open('/dev/aggnet0', 'r+b') as aggnet:
-        inputs = [aggnet, client]
+        in_frames = []
+
+        inputs = [client]
         outputs = []
         exceptions = []
 
@@ -20,20 +38,22 @@ def process_client(client):
             inputs, outputs, exceptions = select.select(inputs, outputs, exceptions)
 
             if client in inputs:
-                print('client in')
-                pass
+                client_read(client, in_frames)
             if client in outputs:
-                print('client out')
                 pass
             if client in exceptions:
-                print('client ex')
                 pass
             if aggnet in inputs:
                 aggnet_read(aggnet)
-                print('aggnet in')
             if aggnet in outputs:
-                print('aggnet out')
                 pass
+
+            inputs = [client]
+            outputs = []
+
+            if len(in_frames) > 0:
+                outputs.append(aggnet)
+
 
 def process_server(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -42,8 +62,12 @@ def process_server(port):
         server.listen(1)
 
         while True:
-            client, _ = server.accept()
-            process_client(client)
+            try:
+                client, _ = server.accept()
+                process_client(client)
+            except Exception as error:
+                print(error)
+
 
 def main():
     process_server(20000)
